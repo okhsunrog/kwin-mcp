@@ -164,6 +164,7 @@ _EI_EVENT_KEYBOARD_MODIFIERS = 9
 
 # Scroll axis values (in libei, scroll is in pixels)
 _SCROLL_STEP_PIXELS = 15.0
+_SCROLL_DISCRETE_UNITS = 120
 
 # Pre-reconnect stall wait (wingman #231, #235): a PAUSED stall without a
 # RESUMED leads into a reconnect anyway, so waiting longer before it only
@@ -1311,7 +1312,12 @@ class EISClient:
     def pointer_scroll_discrete(self, dx: int, dy: int) -> None:
         """Scroll by discrete steps (wheel ticks)."""
         self._ensure_devices_ready()
-        _get_libei().ei_device_scroll_discrete(self._pointer, dx, dy)
+        # libei measures discrete scroll in fractions of a detent: 120 is one
+        # wheel click. Passing tick counts straight through sent 1/120 of a
+        # click per tick, which clients such as Qt apps accumulate and ignore.
+        _get_libei().ei_device_scroll_discrete(
+            self._pointer, dx * _SCROLL_DISCRETE_UNITS, dy * _SCROLL_DISCRETE_UNITS
+        )
         _get_libei().ei_device_frame(self._pointer, self._now_us())
         self._flush()
 
