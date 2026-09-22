@@ -356,6 +356,13 @@ class Session:
             with contextlib.suppress(subprocess.TimeoutExpired):
                 self._process.wait(timeout=3)
 
+        # dbus-run-session exits on SIGTERM right away, while kwin_wayland keeps
+        # running for a moment to write kwinrulesrc and kwinoutputconfig.json.
+        # Removing the isolated home before the whole group is gone leaks it.
+        if not self._wait_for_process_group(timeout=5):
+            self._signal_process_group(signal.SIGKILL)
+            self._wait_for_process_group(timeout=3)
+
         # Clean up home directory and/or screenshot directory
         if self._home_dir is not None:
             keep_home = self._config is not None and self._config.keep_home
@@ -387,8 +394,25 @@ class Session:
         """Signal the whole session process group, ignoring races."""
         if self._process is None:
             return
+        # start_new_session=True makes the session PID the group ID. Using it
+        # directly keeps the group reachable after the leader has been reaped.
         with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(os.getpgid(self._process.pid), sig)
+            os.killpg(self._process.pid, sig)
+
+    def _wait_for_process_group(self, timeout: float) -> bool:
+        """Wait until no process of the session group is left alive."""
+        if self._process is None:
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(self._process.pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return False
+            time.sleep(0.05)
+        return False
 
     def _build_wrapper_script(self, config: SessionConfig) -> str:
         """Build the bash script that runs inside dbus-run-session."""
