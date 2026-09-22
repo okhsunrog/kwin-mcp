@@ -215,7 +215,7 @@ async def find_ui_elements(
     query: Annotated[
         str,
         Field(
-            description="Search text (case-insensitive, matches names/roles/descriptions). "
+            description="Search text (case-insensitive, matches names/roles/descriptions/text). "
             "Can be empty string when filtering by states only."
         ),
     ],
@@ -692,7 +692,7 @@ async def wait_for_element(
     query: Annotated[
         str,
         Field(
-            description="Search text (case-insensitive, matches names/roles/descriptions). "
+            description="Search text (case-insensitive, matches names/roles/descriptions/text). "
             "Can be empty string when waiting for state changes only."
         ),
     ],
@@ -710,12 +710,22 @@ async def wait_for_element(
             "Common states: active, focused, visible, enabled, checked, selected, expanded."
         ),
     ] = None,
+    stable_ms: Annotated[
+        int,
+        Field(
+            description="Also wait until the matches keep the same position and size for "
+            "this long, so a menu or dialog that animates in is reported where it comes to "
+            "rest rather than mid-animation. 0 returns the first match immediately."
+        ),
+    ] = 300,
 ) -> str:
-    """Wait for a UI element matching query and/or states to appear.
+    """Wait for a UI element matching query and/or states to appear and settle.
 
-    Polls repeatedly until a matching element is found or the timeout expires.
-    Returns matching elements in the same format as find_ui_elements, or a
-    timeout error message.
+    Polls repeatedly until a matching element is found and its rectangle stops
+    moving, or the timeout expires. Returns matching elements in the same format
+    as find_ui_elements, or a timeout error message. Use this rather than
+    find_ui_elements right after opening a menu, popover or dialog: their
+    coordinates are wrong while they animate.
     """
     return _engine.wait_for_element(
         query=query,
@@ -723,6 +733,7 @@ async def wait_for_element(
         timeout_ms=timeout_ms,
         poll_interval_ms=poll_interval_ms,
         expected_states=expected_states,
+        stable_ms=stable_ms,
     )
 
 

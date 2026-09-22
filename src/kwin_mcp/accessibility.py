@@ -214,7 +214,8 @@ def wait_for_elements(
     timeout_ms: int = 5000,
     poll_interval_ms: int = 200,
     states: list[str] | None = None,
-) -> list[ElementInfo]:
+    stable_ms: int = 0,
+) -> tuple[list[ElementInfo], bool]:
     """Poll for elements matching a query and/or states until found or timeout.
 
     Args:
@@ -223,29 +224,49 @@ def wait_for_elements(
         timeout_ms: Maximum wait time in milliseconds.
         poll_interval_ms: Polling interval in milliseconds.
         states: If provided, only match elements that have ALL of these states.
+        stable_ms: Also wait until the matches keep the same rectangles for this long.
+            Menus and dialogs that animate in report in-between positions (a menu item
+            sliding in from y=-230), and clicking those misses. 0 returns the first match.
 
     Returns:
-        List of matching elements.
+        The matching elements, and whether their rectangles had settled. When the timeout
+        expires while matches are still moving, the last matches are returned unsettled.
 
     Raises:
         TimeoutError: If no elements found within timeout.
     """
     deadline = time.monotonic() + timeout_ms / 1000.0
     interval = poll_interval_ms / 1000.0
+    last: list[ElementInfo] = []
+    last_rects: list[tuple[int, int, int, int]] | None = None
+    unchanged_since = 0.0
 
     while True:
         elements = find_elements(query, app_name=app_name, states=states)
+        now = time.monotonic()
         if elements:
-            return elements
+            if stable_ms <= 0:
+                return elements, True
+            rects = [(e.x, e.y, e.width, e.height) for e in elements]
+            if rects != last_rects:
+                last_rects = rects
+                unchanged_since = now
+            elif (now - unchanged_since) * 1000 >= stable_ms:
+                return elements, True
+            last = elements
+        else:
+            last, last_rects = [], None
 
-        if time.monotonic() >= deadline:
+        if now >= deadline:
+            if last:
+                return last, False
             criteria = f"query='{query}'"
             if states:
                 criteria += f", states={states}"
             msg = f"Timeout after {timeout_ms}ms: no elements matching {criteria}"
             raise TimeoutError(msg)
 
-        time.sleep(interval)
+        time.sleep(min(interval, max(deadline - now, 0.0)))
 
 
 def _format_element(
@@ -533,16 +554,17 @@ def _handle_request(request: dict) -> dict:
 
     if op == "wait":
         try:
-            elements = wait_for_elements(
+            elements, stable = wait_for_elements(
                 query=request.get("query", ""),
                 app_name=request.get("app_name", ""),
                 timeout_ms=request.get("timeout_ms", 5000),
                 poll_interval_ms=request.get("poll_interval_ms", 200),
                 states=request.get("states"),
+                stable_ms=request.get("stable_ms", 0),
             )
         except TimeoutError as exc:
             return {"ok": False, "error": str(exc)}
-        return {"ok": True, "result": [asdict(e) for e in elements]}
+        return {"ok": True, "result": [asdict(e) for e in elements], "stable": stable}
 
     if op == "list_windows":
         return {"ok": True, "result": list_windows()}

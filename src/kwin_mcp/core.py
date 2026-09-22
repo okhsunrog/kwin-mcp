@@ -347,6 +347,10 @@ class AutomationEngine:
         """
         env = self._session_env()
         payload = json.dumps({"op": op, **kwargs})
+        # A wait polls for up to its own timeout inside the worker, so a fixed 30s limit
+        # killed every wait of 30s or more and turned its TIMEOUT into a hard error.
+        wait_ms = kwargs.get("timeout_ms", 0)
+        timeout_s = 30 + (wait_ms / 1000 if isinstance(wait_ms, int) else 0)
 
         last_error = ""
         for attempt in range(2):
@@ -359,10 +363,10 @@ class AutomationEngine:
                     env=env,
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=timeout_s,
                 )
             except subprocess.TimeoutExpired:
-                last_error = f"AT-SPI2 query timed out after 30s (op={op})"
+                last_error = f"AT-SPI2 query timed out after {timeout_s:.0f}s (op={op})"
                 continue
 
             if result.returncode != 0:
@@ -958,8 +962,12 @@ class AutomationEngine:
         timeout_ms: int = 5000,
         poll_interval_ms: int = 200,
         expected_states: list[str] | None = None,
+        stable_ms: int = 300,
     ) -> str:
         """Wait for a UI element to appear in the accessibility tree.
+
+        With stable_ms > 0 the matches must also keep the same rectangles for that
+        long, so an animating menu or dialog is reported where it comes to rest.
 
         Error contract (H-3/H-4): a timeout is NOT a crash — it is a
         legitimate negative result and is returned as a normal response
@@ -975,6 +983,7 @@ class AutomationEngine:
             timeout_ms=timeout_ms,
             poll_interval_ms=poll_interval_ms,
             states=expected_states,
+            stable_ms=stable_ms,
         )
         if not resp["ok"]:
             # The AT-SPI worker raises TimeoutError for a failed wait: that is
@@ -993,6 +1002,11 @@ class AutomationEngine:
 
         lines = [f"Found {len(elements)} elements matching {search_desc}:\n"]
         lines.extend(_format_found_element(el) for el in elements)
+        if not resp.get("stable", True):
+            lines.append(
+                f"\nWarning: positions were still changing after {timeout_ms}ms "
+                "(animation or layout in progress); query again before clicking."
+            )
         return "\n".join(lines)
 
     # ── Window management tools ───────────────────────────────────────────
