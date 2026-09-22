@@ -77,6 +77,12 @@ callDBus("{sink}", "{path}", "{sink}", "Report", activated);
 """
 
 
+def _coord(value: str) -> int:
+    # With fractional scaling KWin reports logical geometry as floats
+    # (e.g. "2402.859200609735"), so int() on the raw string would raise.
+    return round(float(value))
+
+
 def _parse(payload: str) -> list[dict[str, object]]:
     windows: list[dict[str, object]] = []
     for record in payload.split(_RECORD_SEPARATOR):
@@ -85,13 +91,17 @@ def _parse(payload: str) -> list[dict[str, object]]:
         fields = record.split(_FIELD_SEPARATOR)
         if len(fields) != 10:
             continue
-        app, caption, fx, fy, fw, fh, cx, cy, cw, ch = fields
+        app, caption, *numbers = fields
+        try:
+            fx, fy, fw, fh, cx, cy, cw, ch = (_coord(n) for n in numbers)
+        except ValueError:
+            continue
         windows.append(
             {
                 "app": app,
                 "caption": caption,
-                "frame": {"x": int(fx), "y": int(fy), "width": int(fw), "height": int(fh)},
-                "client": {"x": int(cx), "y": int(cy), "width": int(cw), "height": int(ch)},
+                "frame": {"x": fx, "y": fy, "width": fw, "height": fh},
+                "client": {"x": cx, "y": cy, "width": cw, "height": ch},
             }
         )
     return windows
