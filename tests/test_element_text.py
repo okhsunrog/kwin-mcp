@@ -12,11 +12,43 @@ class _FakeText:
 
 
 class _FakeElement:
-    def __init__(self, text: str | None) -> None:
+    def __init__(
+        self, text: str | None, children: list[_FakeElement] | None = None, name: str = ""
+    ) -> None:
         self._text = text
+        self._children = children or []
+        self._name = name
 
     def get_text_iface(self) -> _FakeText | None:
         return None if self._text is None else _FakeText(self._text)
+
+    def get_hypertext_iface(self) -> _FakeElement | None:
+        return self if self._children else None
+
+    def get_name(self) -> str:
+        return self._name
+
+    def link_at(self, offset: int) -> int:
+        """Index of the embedded object at a character offset, like AT-SPI Hypertext."""
+        if self._text is None or self._text[offset] != accessibility._OBJECT_REPLACEMENT:
+            return -1
+        return self._text[:offset].count(accessibility._OBJECT_REPLACEMENT)
+
+
+class _FakeAtspiHypertext:
+    @staticmethod
+    def get_link_index(element: _FakeElement, offset: int) -> int:
+        return element.link_at(offset)
+
+    @staticmethod
+    def get_link(element: _FakeElement, index: int) -> _FakeElement:
+        return element._children[index]
+
+
+class _FakeAtspiHyperlink:
+    @staticmethod
+    def get_object(link: _FakeElement, _index: int) -> _FakeElement:
+        return link
 
 
 class _FakeAtspiText:
@@ -49,6 +81,25 @@ def test_text_equal_to_name_is_dropped(monkeypatch) -> None:
 def test_container_of_child_objects_is_empty(monkeypatch) -> None:
     obj = accessibility._OBJECT_REPLACEMENT
     assert _text(monkeypatch, f"{obj}\n{obj} {obj}") == ""
+
+
+def test_inline_links_keep_their_text(monkeypatch) -> None:
+    monkeypatch.setattr(accessibility.Atspi, "Text", _FakeAtspiText)
+    monkeypatch.setattr(accessibility.Atspi, "Hypertext", _FakeAtspiHypertext)
+    monkeypatch.setattr(accessibility.Atspi, "Hyperlink", _FakeAtspiHyperlink)
+    obj = accessibility._OBJECT_REPLACEMENT
+    paragraph = _FakeElement(
+        f"Wayland is a {obj} that specifies the {obj}.",
+        children=[
+            _FakeElement("communication protocol"),
+            # A child without text falls back to its name.
+            _FakeElement(None, name="display server"),
+        ],
+    )
+    assert (
+        accessibility._extract_text(paragraph, "")
+        == "Wayland is a communication protocol that specifies the display server."
+    )
 
 
 def test_long_text_is_capped(monkeypatch) -> None:

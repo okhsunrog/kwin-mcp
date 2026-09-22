@@ -6,6 +6,7 @@ Reads a JSON request from stdin and writes a JSON response to stdout.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import time
@@ -443,6 +444,18 @@ def _extract_text(element: Atspi.Accessible, name: str) -> str:
     Paragraphs, labels and editors carry their content in the Text interface, not in the
     name, so without this a hint or an error message is invisible in the tree.
     """
+    raw = _read_text(element)
+    if not raw:
+        return ""
+    text = " ".join(_inline_children(element, raw, depth=0).split())
+    if not text or text == name.strip():
+        return ""
+    if len(text) > TEXT_LIMIT:
+        text = text[: TEXT_LIMIT - 1] + "…"
+    return text
+
+
+def _read_text(element: Atspi.Accessible) -> str:
     try:
         text_iface = element.get_text_iface()
         if text_iface is None:
@@ -452,15 +465,47 @@ def _extract_text(element: Atspi.Accessible, name: str) -> str:
         count = Atspi.Text.get_character_count(text_iface)
         if count <= 0:
             return ""
-        raw = Atspi.Text.get_text(text_iface, 0, min(count, TEXT_LIMIT * 4))
+        return Atspi.Text.get_text(text_iface, 0, min(count, TEXT_LIMIT * 4))
     except Exception:
         return ""
-    text = " ".join(raw.replace(_OBJECT_REPLACEMENT, " ").split())
-    if not text or text == name.strip():
-        return ""
-    if len(text) > TEXT_LIMIT:
-        text = text[: TEXT_LIMIT - 1] + "…"
-    return text
+
+
+def _inline_children(element: Atspi.Accessible, raw: str, depth: int) -> str:
+    """Replace each embedded-object character with the text of the child it stands for.
+
+    Browsers put one U+FFFC in a paragraph's text for every inline child, links included,
+    so dropping them turns "is a communication protocol that" into "is a that". The
+    Hypertext interface maps each such offset to its object; child order does not, since
+    plain text runs are children too. A container made of nothing but children is left
+    empty: its content is already reported by the children themselves.
+    """
+    if _OBJECT_REPLACEMENT not in raw:
+        return raw
+    hypertext = None
+    with contextlib.suppress(Exception):
+        hypertext = element.get_hypertext_iface()
+    if hypertext is None or depth >= 2 or not raw.replace(_OBJECT_REPLACEMENT, "").strip():
+        return raw.replace(_OBJECT_REPLACEMENT, " ")
+    parts: list[str] = []
+    for offset, char in enumerate(raw):
+        if char != _OBJECT_REPLACEMENT:
+            parts.append(char)
+            continue
+        child = None
+        with contextlib.suppress(Exception):
+            index = Atspi.Hypertext.get_link_index(hypertext, offset)
+            if index >= 0:
+                link = Atspi.Hypertext.get_link(hypertext, index)
+                child = Atspi.Hyperlink.get_object(link, 0) if link is not None else None
+        if child is None:
+            parts.append(" ")
+            continue
+        child_raw = _read_text(child)
+        inline = (
+            _inline_children(child, child_raw, depth + 1) if child_raw else child.get_name() or ""
+        )
+        parts.append(inline or " ")
+    return "".join(parts)
 
 
 # ── CLI entrypoint for subprocess execution ──────────────────────────────
