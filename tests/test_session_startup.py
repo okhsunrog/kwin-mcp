@@ -229,6 +229,9 @@ def test_session_connect_degrades_when_input_backend_raises_tool_error(
     monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/dbus")
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-mcp-test")
     monkeypatch.setattr(core_module.time, "sleep", lambda *_: None)
+    # session_connect makes a real screenshot directory; keep it out of the system temp dir,
+    # where every test run used to leave an empty kwin-mcp-screenshots-* behind.
+    monkeypatch.setattr(core_module.tempfile, "tempdir", str(tmp_path))
 
     class FakeBus:
         def get_object(self, *_args: Any, **_kwargs: Any) -> object:
