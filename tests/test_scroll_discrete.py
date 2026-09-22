@@ -17,20 +17,16 @@ class _RecordingLibei:
         pass
 
 
-def _client() -> EISClient:
-    client = EISClient.__new__(EISClient)
-    client._pointer = 1  # type: ignore[attr-defined]
-    client._ensure_devices_ready = lambda: None  # type: ignore[method-assign]
-    client._flush = lambda: None  # type: ignore[method-assign]
-    client._now_us = lambda: 0  # type: ignore[method-assign]
-    return client
-
-
 def test_one_tick_is_one_detent(monkeypatch) -> None:
     fake = _RecordingLibei()
     monkeypatch.setattr(input_module, "_get_libei", lambda: fake)
+    client = EISClient.__new__(EISClient)
+    monkeypatch.setattr(client, "_pointer", 1, raising=False)
+    monkeypatch.setattr(client, "_ensure_devices_ready", lambda: None)
+    monkeypatch.setattr(client, "_flush", lambda: None)
+    monkeypatch.setattr(client, "_now_us", lambda: 0)
 
-    _client().pointer_scroll_discrete(0, 3)
-    _client().pointer_scroll_discrete(-2, 0)
+    client.pointer_scroll_discrete(0, 3)
+    client.pointer_scroll_discrete(-2, 0)
 
     assert fake.discrete == [(0, 360), (-240, 0)]

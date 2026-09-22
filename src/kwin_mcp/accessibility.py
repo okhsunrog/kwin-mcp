@@ -38,6 +38,14 @@ class ElementInfo:
     actions: list[str]
     children_count: int
     depth: int
+    text: str = ""
+
+
+#: Longest text reported per element, so a tree dump never inlines a whole document.
+TEXT_LIMIT = 200
+
+# Web engines put one of these in a container's text for every child element.
+_OBJECT_REPLACEMENT = chr(0xFFFC)
 
 
 def get_accessibility_tree(
@@ -94,7 +102,7 @@ def find_elements(
 ) -> list[ElementInfo]:
     """Find elements matching a query string and/or required states.
 
-    Searches element names, roles, and descriptions. Optionally filters
+    Searches element names, roles, descriptions and text. Optionally filters
     by AT-SPI2 states.
 
     Args:
@@ -283,7 +291,8 @@ def _format_element(
         pos_str = f" @ ({info.x}, {info.y}, {info.width}x{info.height})"
         actions_str = f" [actions: {', '.join(info.actions)}]" if info.actions else ""
 
-        line = f'{indent}- [{info.role}] "{info.name}"{states_str}{pos_str}{actions_str}'
+        text_str = f" text={info.text!r}" if info.text else ""
+        line = f'{indent}- [{info.role}] "{info.name}"{text_str}{states_str}{pos_str}{actions_str}'
         lines.append(line)
         count = 1
 
@@ -339,6 +348,7 @@ def _search_element(
         query in info.name.lower()
         or query in info.role.lower()
         or query in info.description.lower()
+        or query in info.text.lower()
     )
 
     # Check if element matches required states
@@ -422,7 +432,35 @@ def _extract_info(element: Atspi.Accessible, depth: int, dx: int = 0, dy: int = 
         actions=actions,
         children_count=element.get_child_count(),
         depth=depth,
+        # Never read a password field's contents into a tree dump or a log.
+        text="" if role == "password text" else _extract_text(element, name),
     )
+
+
+def _extract_text(element: Atspi.Accessible, name: str) -> str:
+    """Return the element's own visible text, or "" when it adds nothing to the name.
+
+    Paragraphs, labels and editors carry their content in the Text interface, not in the
+    name, so without this a hint or an error message is invisible in the tree.
+    """
+    try:
+        text_iface = element.get_text_iface()
+        if text_iface is None:
+            return ""
+        # Call through the interface class: the bound method on the accessible returns an
+        # empty string on some PyGObject versions.
+        count = Atspi.Text.get_character_count(text_iface)
+        if count <= 0:
+            return ""
+        raw = Atspi.Text.get_text(text_iface, 0, min(count, TEXT_LIMIT * 4))
+    except Exception:
+        return ""
+    text = " ".join(raw.replace(_OBJECT_REPLACEMENT, " ").split())
+    if not text or text == name.strip():
+        return ""
+    if len(text) > TEXT_LIMIT:
+        text = text[: TEXT_LIMIT - 1] + "…"
+    return text
 
 
 # ── CLI entrypoint for subprocess execution ──────────────────────────────

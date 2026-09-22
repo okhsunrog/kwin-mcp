@@ -351,16 +351,23 @@ def _parse_payload(payload: str) -> list[WindowGeometry]:
 _ACTIVATE_SCRIPT_TEMPLATE = """try {
     var wanted = "__APP_NAME__".toLowerCase();
     var wins = workspace.windowList();
+    // Rank matches instead of taking the first substring hit: a browser tab titled after
+    // an app ("Floppa VPN Login - Zen Browser") must not win over the app itself.
     var target = null;
+    var best = 0;
     for (var i = 0; i < wins.length; i++) {
         var w = wins[i];
         var cls = (w.resourceClass || "").toLowerCase();
         var cap = (w.caption || "").toLowerCase();
         var res = (w.resourceName || "").toLowerCase();
-        if (cls.indexOf(wanted) >= 0 || cap.indexOf(wanted) >= 0 || res.indexOf(wanted) >= 0) {
-            target = w;
-            if (w.normalWindow) { break; }
-        }
+        var score = 0;
+        if (cls === wanted || res === wanted) { score = 4; }
+        else if (cap === wanted) { score = 3; }
+        else if (cls.indexOf(wanted) >= 0 || res.indexOf(wanted) >= 0) { score = 2; }
+        else if (cap.indexOf(wanted) >= 0) { score = 1; }
+        if (score === 0) { continue; }
+        score = score * 2 + (w.normalWindow ? 1 : 0);
+        if (score > best) { best = score; target = w; }
     }
     if (target) {
         workspace.activeWindow = target;

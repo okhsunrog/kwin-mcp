@@ -275,6 +275,16 @@ def _parse_mouse_button(button: str) -> MouseButton:
         tool_error(f"Invalid button {button!r}: expected 'left', 'right', or 'middle'")
 
 
+def _format_found_element(el: dict) -> str:
+    """One line of a find_ui_elements / wait_for_element result."""
+    text_str = f" text={el['text']!r}" if el.get("text") else ""
+    actions_str = f" [actions: {', '.join(el['actions'])}]" if el["actions"] else ""
+    return (
+        f'- [{el["role"]}] "{el["name"]}"{text_str} '
+        f"@ ({el['x']}, {el['y']}, {el['width']}x{el['height']}){actions_str}"
+    )
+
+
 class AutomationEngine:
     """Core automation engine encapsulating all tool logic.
 
@@ -631,12 +641,7 @@ class AutomationEngine:
             return f"No elements found matching {search_desc}"
 
         lines = [f"Found {len(elements)} elements matching {search_desc}:\n"]
-        for el in elements:
-            actions_str = f" [actions: {', '.join(el['actions'])}]" if el["actions"] else ""
-            lines.append(
-                f'- [{el["role"]}] "{el["name"]}" '
-                f"@ ({el['x']}, {el['y']}, {el['width']}x{el['height']}){actions_str}"
-            )
+        lines.extend(_format_found_element(el) for el in elements)
         return "\n".join(lines)
 
     # ── Mouse tools ───────────────────────────────────────────────────────
@@ -987,12 +992,7 @@ class AutomationEngine:
         search_desc = ", ".join(criteria) if criteria else "(all)"
 
         lines = [f"Found {len(elements)} elements matching {search_desc}:\n"]
-        for el in elements:
-            actions_str = f" [actions: {', '.join(el['actions'])}]" if el["actions"] else ""
-            lines.append(
-                f'- [{el["role"]}] "{el["name"]}" '
-                f"@ ({el['x']}, {el['y']}, {el['width']}x{el['height']}){actions_str}"
-            )
+        lines.extend(_format_found_element(el) for el in elements)
         return "\n".join(lines)
 
     # ── Window management tools ───────────────────────────────────────────
