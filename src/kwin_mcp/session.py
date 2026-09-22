@@ -344,6 +344,12 @@ class Session:
         if self._process is None:
             return
 
+        # Apps started by launch_app are children of this process, not of the
+        # session's process group, so the signal below never reaches them. A
+        # surviving app keeps writing into the isolated home and defeats its
+        # removal.
+        self._terminate_apps()
+
         # Send SIGTERM to the entire process group (all children)
         self._signal_process_group(signal.SIGTERM)
 
@@ -356,6 +362,13 @@ class Session:
                 self._process.kill()
             with contextlib.suppress(subprocess.TimeoutExpired):
                 self._process.wait(timeout=3)
+
+        # dbus-run-session exits on SIGTERM right away, while kwin_wayland keeps
+        # running for a moment to write kwinrulesrc and kwinoutputconfig.json.
+        # Removing the isolated home before the whole group is gone leaks it.
+        if not self._wait_for_process_group(timeout=5):
+            self._signal_process_group(signal.SIGKILL)
+            self._wait_for_process_group(timeout=3)
 
         # Clean up home directory and/or screenshot directory
         if self._home_dir is not None:
@@ -516,11 +529,43 @@ wait $KWIN_PID
         """Send a signal to the session's whole process group, ignoring races."""
         if self._process is None:
             return
-        try:
-            pgid = os.getpgid(self._process.pid)
-            os.killpg(pgid, sig)
-        except (ProcessLookupError, PermissionError):
-            pass
+        # start_new_session=True makes the session PID the group ID. Using it
+        # directly keeps the group reachable after the leader has been reaped.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(self._process.pid, sig)
+
+    def _wait_for_process_group(self, timeout: float) -> bool:
+        """Wait until no process of the session group is left alive."""
+        if self._process is None:
+            return True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(self._process.pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return False
+            time.sleep(0.05)
+        return False
+
+    def _terminate_apps(self) -> None:
+        """Stop applications started through launch_app and reap them."""
+        if self._info is None:
+            return
+        for app in list(self._info.apps.values()):
+            if app.process.poll() is not None:
+                continue
+            with contextlib.suppress(ProcessLookupError):
+                app.process.terminate()
+        for app in list(self._info.apps.values()):
+            try:
+                app.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    app.process.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    app.process.wait(timeout=2)
 
     @staticmethod
     def _read_startup_lines(
