@@ -45,9 +45,9 @@ Each interaction is three steps. Cheap observation **before** action prevents ac
 **Observation tools, cheapest first:**
 
 1. `list_windows` — window titles + active/focused markers. Free.
-2. `accessibility_tree` — full AT-SPI2 widget tree. Always pass `app_name=` and/or `role=` (e.g. `"button"`, `"check box"`) and/or `max_depth=` to keep it small. Don't fetch the whole tree just to find one button.
-3. `find_ui_elements` — query by name/role/states. Use this when you know what you are looking for. `query=""` + `states=["focused"]` answers "what currently has focus?".
-4. `wait_for_element` — same matching as `find_ui_elements` but polls until the element appears (or `timeout_ms` elapses). Use after launching an app or after any click that triggers async UI.
+2. `accessibility_tree` — full AT-SPI2 widget tree. Always pass `app_name=` and/or `role=` (e.g. `"button"`, `"check box"`) and/or `max_depth=` to keep it small. Don't fetch the whole tree just to find one button. Paragraphs, labels and fields show their content as `text='...'` (capped at 200 characters, inline links included), so hints, error messages and page text can be read without a screenshot.
+3. `find_ui_elements` — query by name/role/description/text/states. Use this when you know what you are looking for. `query=""` + `states=["focused"]` answers "what currently has focus?".
+4. `wait_for_element` — same matching as `find_ui_elements` but polls until the element appears **and stops moving** (`stable_ms`, default 300) or `timeout_ms` elapses. Use after launching an app and after any click that opens a menu, popover or dialog: their coordinates are wrong while they animate in, and `find_ui_elements` reports whatever frame it happens to catch. A trailing "positions were still changing" warning means query again before clicking.
 5. `screenshot` — last resort for visual inspection or when AT-SPI2 fails to expose an element (see Pitfalls).
 
 Pick the cheapest tool that answers the question. Do not start with `screenshot` if `find_ui_elements("Save")` would suffice.
@@ -75,6 +75,9 @@ These are properties of the Wayland / AT-SPI2 / EIS stack, not bugs. Know them o
 - **`keyboard_type` is US QWERTY only.** Non-ASCII text must go through `keyboard_type_unicode`. Always check the input.
 - **Clipboard is opt-in on virtual sessions.** Pass `enable_clipboard=true` to `session_start` AND ensure `wl-clipboard` is installed. Live sessions always have clipboard.
 - **AT-SPI2 coordinates are translated to true screen coordinates.** Wayland clients report window-local coordinates (they do not know their global position by design), so the server offsets each window's widgets by its compositor-side position from KWin. If a window cannot be matched (e.g. KWin scripting unavailable), coordinates may still be window-local — cross-reference with `screenshot` to disambiguate.
+- **Chromium and Electron apps (Chrome, Logseq, VS Code, ...) expose no tree by default.** Launch them with `--force-renderer-accessibility --ozone-platform=wayland` and they report a full named tree (tabs, address bar, buttons, page text). Without the flag you are limited to screenshots and coordinates. In a virtual session with `isolate_home=true`, add `--no-first-run --password-store=basic` for Chrome. Tauri / WebKitGTK apps expose the tree with no flag.
+- **A fresh Electron profile may never map its first window in a virtual session** (seen with Logseq: the tree shows only the splash page and `list_windows` shows nothing). Stop that process and launch the app again; the second start in the same profile works.
+- **`focus_window` matches by app class first.** Pass the application's class (e.g. `"floppa-client"`, `"org.kde.kate"`) rather than a title fragment: a browser tab titled after the app would otherwise be a candidate too. An exact class or exact window title wins over substring matches.
 - **QMenu and native context menus may be invisible to AT-SPI2.** Qt's AT-SPI2 bridge has incomplete popup-menu support on Wayland. Workaround: take a `screenshot`, locate the menu item visually, click by coordinates.
 - **Screen edge triggers (auto-hide panels, layer-shell strips) ignore EIS pointer events.** Use `dbus_call` to invoke KWin scripting or a keyboard shortcut instead of trying to hover the edge.
 - **Live sessions inside containers need Wayland + D-Bus mounted in.** Symptom: `session_connect` fails with "no Wayland display" or "no session bus". The user must mount `$XDG_RUNTIME_DIR/wayland-*` and propagate `DBUS_SESSION_BUS_ADDRESS` into the container.
@@ -103,6 +106,11 @@ These are properties of the Wayland / AT-SPI2 / EIS stack, not bugs. Know them o
 **"Type 안녕하세요 into the active text field"**:
 1. (Session already open.)
 2. `keyboard_type_unicode(text="안녕하세요")` — never `keyboard_type`; it would silently drop the characters.
+
+**"Open a menu item in a web or Electron app"**:
+1. `find_ui_elements(query="More", app_name="logseq")` → `mouse_click` on it.
+2. `wait_for_element(query="Settings", app_name="logseq")` — not `find_ui_elements`: right after the click the menu is still sliding in and its items report positions it is only passing through.
+3. `mouse_click` on the coordinates from step 2.
 
 **"Find what currently has focus"**:
 1. `find_ui_elements(query="", states=["focused"])` — empty query is allowed when filtering by state.
