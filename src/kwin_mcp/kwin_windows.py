@@ -127,19 +127,32 @@ def resolve_offset(
         (dx, dy) to add to raw AT-SPI coordinates. (0, 0) when the window
         cannot be matched unambiguously.
     """
+    geom = match_window(geometries, app_name, window_name)
+    if geom is None:
+        return (0, 0)
+    return (geom.client_x - window_x, geom.client_y - window_y)
+
+
+def match_window(
+    geometries: list[WindowGeometry],
+    app_name: str,
+    window_name: str,
+) -> WindowGeometry | None:
+    """The compositor window behind an AT-SPI top-level window, if unambiguous.
+
+    Args:
+        geometries: Compositor-side geometries from get_window_geometries().
+        app_name: AT-SPI application name (used to disambiguate).
+        window_name: AT-SPI window name; matched against KWin captions.
+    """
     if not window_name:
-        return (0, 0)
+        return None
     candidates = [g for g in geometries if g.caption == window_name]
-    if not candidates:
-        return (0, 0)
     if len(candidates) > 1 and app_name:
         narrowed = [g for g in candidates if app_name.lower() in g.resource_class.lower()]
         if narrowed:
             candidates = narrowed
-    if len(candidates) != 1:
-        return (0, 0)
-    geom = candidates[0]
-    return (geom.client_x - window_x, geom.client_y - window_y)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def fetch_window_geometries(dbus_address: str) -> list[WindowGeometry]:

@@ -11,6 +11,7 @@ import json
 import sys
 import time
 from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING
 
 import gi
 
@@ -20,8 +21,11 @@ from gi.repository import Atspi  # noqa: E402
 from kwin_mcp.kwin_windows import (  # noqa: E402
     WindowGeometry,
     get_window_geometries,
-    resolve_offset,
+    match_window,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 @dataclass
@@ -269,6 +273,125 @@ def wait_for_elements(
         time.sleep(min(interval, max(deadline - now, 0.0)))
 
 
+@dataclass(frozen=True)
+class _Transform:
+    """Maps an element's raw AT-SPI rectangle to screen coordinates: raw / scale + offset."""
+
+    dx: int = 0
+    dy: int = 0
+    scale: float = 1.0
+
+
+_IDENTITY = _Transform()
+
+
+def _walk(
+    element: Atspi.Accessible,
+    depth: int,
+    max_depth: int,
+    app_name: str,
+    geometries: list[WindowGeometry] | None,
+    transform: _Transform = _IDENTITY,
+    parent: ElementInfo | None = None,
+) -> Iterator[ElementInfo]:
+    """Yield an element and its descendants, pre-order, in true screen coordinates.
+
+    Wayland clients report window-local coordinates, so at depth 1 (a top-level
+    window) the offset to the compositor-side client origin is resolved and applied
+    to the whole subtree. Chromium additionally reports web content in device
+    pixels on a scaled output; see _document_scale.
+    """
+    if depth > max_depth:
+        return
+    info = _extract_info(element, depth, transform)
+    if depth == 1 and geometries:
+        window = _window_transform(element, info, app_name, geometries)
+        if window is not None:
+            transform = window
+            info = _extract_info(element, depth, transform)
+    elif parent is not None and info.role == "document web":
+        ratio = _document_scale(info, parent)
+        if ratio is not None:
+            transform = _Transform(transform.dx, transform.dy, transform.scale * ratio)
+            info = _extract_info(element, depth, transform)
+    yield info
+    for i in range(info.children_count):
+        child = element.get_child_at_index(i)
+        if child is not None:
+            yield from _walk(child, depth + 1, max_depth, app_name, geometries, transform, info)
+
+
+def _window_transform(
+    element: Atspi.Accessible,
+    info: ElementInfo,
+    app_name: str,
+    geometries: list[WindowGeometry],
+) -> _Transform | None:
+    """Offset from a top-level window's own coordinates to the screen.
+
+    A client that draws its own frame (Chrome, GTK) reports a surface that
+    includes its drop shadow, larger than the client area KWin reports; its
+    content starts at the child that has the client area's size, not at (0, 0).
+    """
+    geom = match_window(geometries, app_name, info.name)
+    if geom is None:
+        return None
+    origin_x, origin_y = info.x, info.y
+    if info.width - geom.client_w > 2 or info.height - geom.client_h > 2:
+        content = _find_sized_descendant(element, geom.client_w, geom.client_h)
+        if content is not None:
+            origin_x, origin_y = content
+    return _Transform(geom.client_x - origin_x, geom.client_y - origin_y)
+
+
+def _find_sized_descendant(
+    element: Atspi.Accessible, width: int, height: int, max_depth: int = 3
+) -> tuple[int, int] | None:
+    """Origin of the shallowest descendant with this size (within a pixel)."""
+    level = [element]
+    for _ in range(max_depth):
+        next_level = []
+        for node in level:
+            for i in range(node.get_child_count()):
+                child = node.get_child_at_index(i)
+                if child is None:
+                    continue
+                rect = _raw_extents(child)
+                if rect and abs(rect[2] - width) <= 1 and abs(rect[3] - height) <= 1:
+                    return rect[0], rect[1]
+                next_level.append(child)
+        level = next_level
+    return None
+
+
+def _document_scale(document: ElementInfo, parent: ElementInfo) -> float | None:
+    """How many device pixels a web document reports per logical pixel, if not one.
+
+    Chromium on a fractionally scaled Wayland output reports its browser UI in
+    logical pixels but web content in device pixels, origin included, so the
+    document is exactly `scale` times the view that hosts it (2109x1302 inside
+    1406x868 at 150%). WebKitGTK and Gecko report logical pixels throughout.
+    """
+    if parent.width <= 0 or parent.height <= 0:
+        return None
+    ratio_w = document.width / parent.width
+    ratio_h = document.height / parent.height
+    if ratio_w < 1.1 or abs(ratio_w - ratio_h) > 0.05 * ratio_w:
+        return None
+    return ratio_w
+
+
+def _raw_extents(element: Atspi.Accessible) -> tuple[int, int, int, int] | None:
+    try:
+        component = element.get_component_iface()
+        if component is None:
+            return None
+        rect = component.get_extents(Atspi.CoordType.SCREEN)
+    except Exception:
+        return None
+    return rect.x, rect.y, rect.width, rect.height
+
+
 def _format_element(
     element: Atspi.Accessible,
     lines: list[str],
@@ -277,63 +400,25 @@ def _format_element(
     role_filter: str = "",
     app_name: str = "",
     geometries: list[WindowGeometry] | None = None,
-    dx: int = 0,
-    dy: int = 0,
 ) -> int:
-    """Recursively format an element and its children. Returns element count.
+    """Format an element and its descendants into `lines`. Returns the element count.
 
     When role_filter is set, only elements with a matching role are displayed,
     but children of non-matching elements are still traversed.
-
-    Coordinates are translated to true screen coordinates: at depth 1 (a
-    top-level window) the offset between the AT-SPI window origin and the
-    compositor-side client origin is resolved and applied to the whole
-    subtree, because Wayland clients report window-local coordinates.
     """
-    if depth > max_depth:
-        return 0
-
-    info = _extract_info(element, depth, dx=dx, dy=dy)
-    if depth == 1 and geometries:
-        # Top-level window: resolve the offset between the AT-SPI window
-        # origin (window-local on Wayland) and the compositor-side client
-        # origin, then apply it to this window and its whole subtree.
-        # (dx, dy) are always (0, 0) here since depth 0 passes no offset.
-        ndx, ndy = resolve_offset(geometries, app_name, info.name, info.x, info.y)
-        if ndx or ndy:
-            dx, dy = ndx, ndy
-            info.x += dx
-            info.y += dy
-    role_match = not role_filter or role_filter == info.role.lower()
-
     count = 0
-    if role_match:
-        indent = "  " * depth
+    for info in _walk(element, depth, max_depth, app_name, geometries):
+        if role_filter and role_filter != info.role.lower():
+            continue
+        indent = "  " * info.depth
         states_str = f" ({', '.join(info.states)})" if info.states else ""
         pos_str = f" @ ({info.x}, {info.y}, {info.width}x{info.height})"
         actions_str = f" [actions: {', '.join(info.actions)}]" if info.actions else ""
-
         text_str = f" text={info.text!r}" if info.text else ""
-        line = f'{indent}- [{info.role}] "{info.name}"{text_str}{states_str}{pos_str}{actions_str}'
-        lines.append(line)
-        count = 1
-
-    # Always traverse children even when the current element is filtered out
-    for i in range(info.children_count):
-        child = element.get_child_at_index(i)
-        if child is not None:
-            count += _format_element(
-                child,
-                lines,
-                depth + 1,
-                max_depth,
-                role_filter,
-                app_name,
-                geometries,
-                dx,
-                dy,
-            )
-
+        lines.append(
+            f'{indent}- [{info.role}] "{info.name}"{text_str}{states_str}{pos_str}{actions_str}'
+        )
+        count += 1
     return count
 
 
@@ -346,66 +431,29 @@ def _search_element(
     required_states: list[str] | None = None,
     app_name: str = "",
     geometries: list[WindowGeometry] | None = None,
-    dx: int = 0,
-    dy: int = 0,
 ) -> None:
-    """Recursively search for elements matching the query and/or required states.
-
-    Coordinates are translated to true screen coordinates (see
-    _format_element for why).
-    """
-    if depth > max_depth:
-        return
-
-    info = _extract_info(element, depth, dx=dx, dy=dy)
-    if depth == 1 and geometries:
-        ndx, ndy = resolve_offset(geometries, app_name, info.name, info.x, info.y)
-        if ndx or ndy:
-            dx, dy = ndx, ndy
-            info.x += dx
-            info.y += dy
-
-    # Check if element matches query (empty query matches everything)
-    query_match = (
-        query in info.name.lower()
-        or query in info.role.lower()
-        or query in info.description.lower()
-        or query in info.text.lower()
-    )
-
-    # Check if element matches required states
-    states_match = required_states is None or all(s in info.states for s in required_states)
-
-    if query_match and states_match:
-        results.append(info)
-
-    # Search children
-    for i in range(info.children_count):
-        child = element.get_child_at_index(i)
-        if child is not None:
-            _search_element(
-                child,
-                query,
-                results,
-                depth + 1,
-                max_depth,
-                required_states,
-                app_name,
-                geometries,
-                dx,
-                dy,
-            )
+    """Collect elements matching the query (name, role, description or text) and states."""
+    for info in _walk(element, depth, max_depth, app_name, geometries):
+        query_match = (
+            query in info.name.lower()
+            or query in info.role.lower()
+            or query in info.description.lower()
+            or query in info.text.lower()
+        )
+        states_match = required_states is None or all(s in info.states for s in required_states)
+        if query_match and states_match:
+            results.append(info)
 
 
-def _extract_info(element: Atspi.Accessible, depth: int, dx: int = 0, dy: int = 0) -> ElementInfo:
+def _extract_info(
+    element: Atspi.Accessible, depth: int, transform: _Transform = _IDENTITY
+) -> ElementInfo:
     """Extract information from an AT-SPI accessible element.
 
     Args:
         element: The accessible element.
         depth: Depth in the traversed tree.
-        dx: Screen x offset to add (window position correction, see
-            _format_element).
-        dy: Screen y offset to add.
+        transform: Maps the raw rectangle to screen coordinates (see _walk).
     """
     role = element.get_role_name() or "unknown"
     name = element.get_name() or ""
@@ -422,13 +470,12 @@ def _extract_info(element: Atspi.Accessible, depth: int, dx: int = 0, dy: int = 
 
     # Get position and size
     x, y, width, height = 0, 0, 0, 0
-    try:
-        component = element.get_component_iface()
-        if component is not None:
-            rect = component.get_extents(Atspi.CoordType.SCREEN)
-            x, y, width, height = rect.x + dx, rect.y + dy, rect.width, rect.height
-    except Exception:
-        pass
+    rect = _raw_extents(element)
+    if rect is not None:
+        scale = transform.scale
+        x = round(rect[0] / scale) + transform.dx
+        y = round(rect[1] / scale) + transform.dy
+        width, height = round(rect[2] / scale), round(rect[3] / scale)
 
     # Get available actions
     actions: list[str] = []
