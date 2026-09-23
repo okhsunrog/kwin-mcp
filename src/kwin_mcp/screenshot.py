@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 import subprocess
 import threading
@@ -15,6 +16,18 @@ import dbus.bus
 # (tens of milliseconds) yet short enough that the spectacle fallback stays
 # responsive when KWin never answers (ported from upstream isac322/kwin-mcp#42).
 _CAPTURE_TIMEOUT_S = 5.0
+
+_capture_sequence = itertools.count(1)
+
+
+def _unique_stem() -> str:
+    """Timestamp plus a per-process sequence number.
+
+    Seconds alone are not unique: two screenshots in the same second, or two
+    frame bursts with the same delays, used to overwrite each other's files, so
+    a caller holding the first path silently read the second image.
+    """
+    return f"{time.strftime('%Y%m%d_%H%M%S')}_{next(_capture_sequence):04d}"
 
 
 def capture_screenshot_to_file(
@@ -44,8 +57,7 @@ def capture_screenshot_to_file(
         output_dir = Path("/tmp")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output_path = output_dir / f"screenshot_{timestamp}.png"
+    output_path = output_dir / f"screenshot_{_unique_stem()}.png"
 
     try:
         return capture_screenshot_dbus(
@@ -183,11 +195,12 @@ def capture_frame_burst(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     sorted_delays = sorted(delays_ms)
+    burst = _unique_stem()
 
     # Try fast D-Bus capture first
     try:
         return _capture_frame_burst_dbus(
-            dbus_address, output_dir, sorted_delays, include_cursor=include_cursor
+            dbus_address, output_dir, sorted_delays, burst, include_cursor=include_cursor
         )
     except dbus.DBusException:
         # D-Bus authorization failed (e.g. live session without permission bypass).
@@ -197,6 +210,7 @@ def capture_frame_burst(
             wayland_socket,
             output_dir,
             sorted_delays,
+            burst,
             include_cursor=include_cursor,
         )
 
@@ -205,6 +219,7 @@ def _capture_frame_burst_dbus(
     dbus_address: str,
     output_dir: Path,
     sorted_delays: list[int],
+    burst: str,
     *,
     include_cursor: bool = False,
 ) -> list[Path]:
@@ -235,7 +250,7 @@ def _capture_frame_burst_dbus(
     ):
         if not data:
             continue
-        frame_path = output_dir / f"frame_{i:03d}_{delay_ms}ms.png"
+        frame_path = output_dir / f"frame_{burst}_{i:03d}_{delay_ms}ms.png"
         img = Image.frombytes("RGBA", (width, height), data, "raw", "BGRA", stride)
         img.save(frame_path, "PNG")
         frame_paths.append(frame_path)
@@ -248,6 +263,7 @@ def _capture_frame_burst_spectacle(
     wayland_socket: str,
     output_dir: Path,
     sorted_delays: list[int],
+    burst: str,
     *,
     include_cursor: bool = False,
 ) -> list[Path]:
@@ -260,7 +276,7 @@ def _capture_frame_burst_spectacle(
         if now < target_time:
             time.sleep(target_time - now)
 
-        frame_path = output_dir / f"frame_{i:03d}_{delay_ms}ms.png"
+        frame_path = output_dir / f"frame_{burst}_{i:03d}_{delay_ms}ms.png"
         _capture_via_spectacle(
             dbus_address,
             wayland_socket,

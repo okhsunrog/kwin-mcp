@@ -127,7 +127,7 @@ def test_frame_burst_skips_empty_frames(monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.setattr(screenshot_module, "_capture_raw_frame", fake_raw_frame)
     monkeypatch.setattr(Image, "frombytes", fake_frombytes)
     frames = screenshot_module._capture_frame_burst_dbus(
-        "unix:path=/tmp/dbus", tmp_path, [0], include_cursor=False
+        "unix:path=/tmp/dbus", tmp_path, [0], "burst", include_cursor=False
     )
     assert frames == []
     # Phase 2 must not attempt a PNG conversion of the empty frame either.

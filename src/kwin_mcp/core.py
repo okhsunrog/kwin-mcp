@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # delay. Used by _with_frame_capture to label frames: the capture layer
 # skips empty frames inside its internals, so list position alone cannot
 # recover the delay.
-_FRAME_NAME_RE = re.compile(r"frame_\d{3}_(\d+)ms\.png$")
+_FRAME_NAME_RE = re.compile(r"^frame_(?:.+_)?\d{3}_(\d+)ms\.png$")
 
 _DEFAULT_VIRTUAL_SIZE = (1920, 1080)
 
